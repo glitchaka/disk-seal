@@ -219,6 +219,45 @@ No se pretende afirmar que un identificador de hardware sea imposible de falsifi
 
 La construcción concreta del autoextraíble puede vivir en el proyecto consumidor; `disk-seal` debe proporcionar las primitivas de identidad, creación y verificación.
 
+## Uso actual como biblioteca y CLI
+
+La biblioteca puede consumirse desde un instalador Rust o desde SST mediante
+una dependencia Git del repositorio. Las funciones disponibles son:
+
+- `inspect_storage(exe)`: informa sin exponer seriales si el soporte parece
+  apto para un sello portátil.
+- `InstallationSeal::create("sst", version, exe, policy)`: calcula el sello.
+- `save_new(path)`: escribe un archivo nuevo, negándose a sobrescribirlo.
+- `load(path)` + `verify_for_application("sst", exe)`: valida el soporte
+  original y la identidad de la aplicación.
+
+La CLI `disk-seal` dispone de tres operaciones:
+
+```powershell
+cargo run -- inspect E:\SST\sst.exe
+cargo run -- create sst 0.1.9-blue.27 E:\SST\sst.exe E:\SST\data\installation.seal
+cargo run -- verify sst E:\SST\sst.exe E:\SST\data\installation.seal
+```
+
+En condiciones normales, `create` debe ejecutarse **una sola vez**, durante
+la entrega, sobre el soporte original. Si falta el serial físico o Windows no
+reconoce el dispositivo como extraíble/USB, la política estricta rechaza el
+sellado; no se genera un sello débil automáticamente.
+
+### Limitación de la prueba automática
+
+GitHub Actions ejecuta pruebas de lógica, compilación y la CLI en Windows y
+Linux. Los agentes virtuales no disponen de un pendrive USB físico asignado;
+la aceptación en hardware real (variantes NTFS, exFAT, FAT32 y dispositivos
+cuya ruta cambia entre equipos) exige una prueba de campo en Windows. Este
+módulo no debe considerarse una solución anti-clonación invulnerable.
+
+**Importante:** un sello JSON aislado no proporciona autenticidad criptográfica.
+SST debe vincular el `installation_id` y la `storage_fingerprint` a una
+licencia **firmada por la autoridad de activación**, y comprobar esa firma
+antes de habilitar funciones privilegiadas. No incluir claves privadas de
+firma en el pendrive ni el ejecutable.
+
 ## Implementación inicial
 
 La biblioteca `disk-seal` ya contiene una primera implementación Windows: crea un
