@@ -29,3 +29,11 @@ jobs:
         run: cargo test --all-targets --verbose
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
+      - name: Windows native CLI smoke test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo run --quiet -- inspect | ConvertFrom-Json | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'No se pudo inspeccionar el soporte' }
+          cargo run --quiet -- verify sst "$env:WINDIR\System32\notepad.exe" "missing.seal"
+          if ($LASTEXITCODE -eq 0) { throw 'Se aceptó una instalación sin sello' }
