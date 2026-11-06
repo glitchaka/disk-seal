@@ -71,13 +71,11 @@ pub(super) fn capture(executable: &Path) -> Result<StorageIdentity> {
     let mut disk_device = DeviceProperties::default();
     if let Some(handle) = open_metadata_device(&format!(r"\\.\{drive}:")) {
         volume_device = query_properties(handle);
-        if let Some(number) = query_device_number(handle) {
-            if let Some(physical) = open_metadata_device(
-                &format!(r"\\.\PhysicalDrive{number}")
-            ) {
-                disk_device = query_properties(physical);
-                unsafe { CloseHandle(physical); }
-            }
+        if let Some(number) = query_device_number(handle)
+            && let Some(physical) = open_metadata_device(&format!(r"\\.\PhysicalDrive{number}"))
+        {
+            disk_device = query_properties(physical);
+            unsafe { CloseHandle(physical); }
         }
         unsafe { CloseHandle(handle); }
     }
