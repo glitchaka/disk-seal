@@ -9,11 +9,12 @@ use windows_sys::Win32::{
     Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
     Storage::FileSystem::{
         CreateFileW, GetDriveTypeW, GetVolumeInformationW, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING, DRIVE_REMOVABLE,
+        FILE_SHARE_WRITE, OPEN_EXISTING, 
     },
     System::IO::DeviceIoControl,
 };
 use super::StorageIdentity;
+const DRIVE_REMOVABLE: u32 = 2;
 
 // IOCTL_STORAGE_QUERY_PROPERTY = CTL_CODE(IOCTL_STORAGE_BASE, 0x500, METHOD_BUFFERED, FILE_ANY_ACCESS)
 const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002d_1400;
@@ -50,7 +51,7 @@ pub(super) fn capture(executable: &Path) -> Result<StorageIdentity> {
     let filesystem = String::from_utf16_lossy(&fs_buffer[..fs_len]).to_ascii_uppercase();
 
     // USB devices can report DRIVE_FIXED on some bridges. The conservative
-    // initial policy requires DRIVE_REMOVABLE, never silently treats them as USB.
+    // initial policy requires  never silently treats them as USB.
     let removable = unsafe { GetDriveTypeW(root_w.as_ptr()) } == DRIVE_REMOVABLE;
     let serial = query_storage_serial(drive)?;
 

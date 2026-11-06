@@ -244,9 +244,9 @@ fn hex(data: &[u8]) -> String {
 }
 
 fn decode_hex(data: &str) -> Result<Vec<u8>> {
-    if data.len() % 2 != 0 { bail!("hex inválido"); }
+    if !data.len().is_multiple_of(2) { bail!("hex inválido"); }
     let mut output = Vec::new();
-    for pair in data.as_bytes().chunks_exact(2) {
+    for pair in data.as_bytes().chunks(2) {
         let digit = |b: u8| -> Result<u8> {
             match b {
                 b'0'..=b'9' => Ok(b - b'0'),
