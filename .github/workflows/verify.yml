@@ -35,5 +35,8 @@ jobs:
         run: |
           cargo run --quiet -- inspect | ConvertFrom-Json | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'No se pudo inspeccionar el soporte' }
-          cargo run --quiet -- verify sst "$env:WINDIR\System32\notepad.exe" "missing.seal"
+          # Expected negative test: a missing seal MUST fail. Prevent pwsh's
+          # native-command error preference from aborting before assertion.
+          $PSNativeCommandUseErrorActionPreference = $false
+          cargo run --quiet -- verify sst "$env:WINDIR\System32\notepad.exe" "missing.seal" *> $null
           if ($LASTEXITCODE -eq 0) { throw 'Se aceptó una instalación sin sello' }
