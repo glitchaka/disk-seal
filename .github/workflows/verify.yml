@@ -40,3 +40,6 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           cargo run --quiet -- verify sst "$env:WINDIR\System32\notepad.exe" "missing.seal" *> $null
           if ($LASTEXITCODE -eq 0) { throw 'Se aceptó una instalación sin sello' }
+          # GitHub's pwsh wrapper exits with LASTEXITCODE by default.
+          # The negative test succeeded, so explicitly reset the step status.
+          exit 0
