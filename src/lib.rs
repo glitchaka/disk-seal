@@ -17,6 +17,7 @@ const SEAL_VERSION: u32 = 1;
 const HASH_DOMAIN: &[u8] = b"disk-seal/windows/v1\0";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SealPolicy {
     pub bind_to_volume: bool,
     pub bind_to_physical_device: bool,
@@ -51,6 +52,7 @@ impl SealPolicy {
 
 /// Public, non-reversible representation. Never contains raw serial numbers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstallationSeal {
     pub seal_format_version: u32,
     pub application_id: String,
@@ -80,29 +82,68 @@ struct StorageIdentity {
     removable: bool,
 }
 
+/// Safe diagnostic information without exposing raw drive or volume serials.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StorageInspection {
+    pub removable: bool,
+    pub has_volume_serial: bool,
+    pub has_physical_serial: bool,
+    pub filesystem: Option<String>,
+    pub strict_usb_compatible: bool,
+}
+
+pub fn inspect_storage(executable: &Path) -> Result<StorageInspection> {
+    let storage = capture_storage(executable)?;
+    let policy = SealPolicy::portable_usb();
+    Ok(StorageInspection {
+        removable: storage.removable,
+        has_volume_serial: storage.volume_serial.is_some(),
+        has_physical_serial: storage.physical_serial.is_some(),
+        filesystem: storage.filesystem.clone(),
+        strict_usb_compatible: check_sources(&storage, &policy).is_ok(),
+    })
+}
+
 impl InstallationSeal {
     /// Called once by the installer after extraction, on the original drive.
+    /// Create a seal for an existing executable on the USB drive.
+    /// The caller must store and authenticate the seal using a separately
+    /// signed activation license; this library does not grant authorization.
     pub fn create(
         app_id: &str,
         app_version: &str,
         executable: &Path,
         policy: SealPolicy,
     ) -> Result<Self> {
-        policy.validate()?;
-        ensure!(!app_id.is_empty() && app_id.len() <= 64 &&
-            app_id.bytes().all(|byte| byte.is_ascii_alphanumeric() ||
-                matches!(byte, b'_' | b'-' | b'.')),
-            "application_id no válido");
         let identity = capture_storage(executable)?;
-        check_sources(&identity, &policy)?;
+        Self::create_with_identity(app_id, app_version, executable, policy, &identity)
+    }
+
+    fn create_with_identity(
+        app_id: &str,
+        app_version: &str,
+        executable: &Path,
+        policy: SealPolicy,
+        identity: &StorageIdentity,
+    ) -> Result<Self> {
+        policy.validate()?;
+        ensure!(
+            !app_id.is_empty()
+                && app_id.len() <= 64
+                && app_id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'_' | b'-' | b'.')),
+            "application_id no válido"
+        );
+        ensure!(
+            !app_version.is_empty() && app_version.len() <= 128,
+            "application_version no válido"
+        );
+        check_sources(identity, &policy)?;
 
         let mut nonce = [0u8; 32];
         let mut installation = [0u8; 16];
         OsRng.fill_bytes(&mut nonce);
         OsRng.fill_bytes(&mut installation);
-        let nonce_hex = hex(&nonce);
-        let sources = source_names(&identity, &policy);
-        let fingerprint = fingerprint(&identity, &policy, &nonce);
         let executable_hash = if policy.bind_to_executable {
             Some(hash_file(executable)?)
         } else {
@@ -113,37 +154,66 @@ impl InstallationSeal {
             seal_format_version: SEAL_VERSION,
             application_id: app_id.to_owned(),
             application_version: app_version.to_owned(),
-            installation_id: format!("SST-{}", hex(&installation).to_uppercase()),
+            installation_id: format!("DS-{}", hex(&installation).to_uppercase()),
             created_at: Local::now().fixed_offset(),
-            storage_fingerprint: hex(&fingerprint),
-            nonce: nonce_hex,
+            storage_fingerprint: hex(&fingerprint(identity, &policy, &nonce)),
+            nonce: hex(&nonce),
+            identity_sources: source_names(identity, &policy),
             policy,
-            identity_sources: sources,
             executable_hash,
         })
     }
 
+    /// Verify the actual storage identity before enabling the consumer app.
     pub fn verify_current_environment(&self, executable: &Path) -> Result<VerifiedInstallation> {
+        let identity = capture_storage(executable)?;
+        self.verify_with_identity(executable, &identity)
+    }
+
+    /// Verify both storage and application identity (recommended for consumers).
+    pub fn verify_for_application(
+        &self,
+        expected_application_id: &str,
+        executable: &Path,
+    ) -> Result<VerifiedInstallation> {
+        ensure!(
+            self.application_id == expected_application_id,
+            "el sello no pertenece a la aplicación solicitada"
+        );
+        self.verify_current_environment(executable)
+    }
+
+    fn verify_with_identity(
+        &self,
+        executable: &Path,
+        identity: &StorageIdentity,
+    ) -> Result<VerifiedInstallation> {
         ensure!(self.seal_format_version == SEAL_VERSION, "formato de sello no compatible");
         self.policy.validate()?;
         ensure!(!self.installation_id.is_empty(), "Installation ID vacío");
         ensure!(!self.application_id.is_empty(), "application_id vacío");
+        ensure!(!self.application_version.is_empty(), "application_version vacío");
         let nonce = decode_hex(&self.nonce)?;
         ensure!(nonce.len() == 32, "nonce inválido");
-        let identity = capture_storage(executable)?;
-        check_sources(&identity, &self.policy)?;
-        let actual_sources = source_names(&identity, &self.policy);
-        ensure!(actual_sources == self.identity_sources,
-            "las fuentes de identidad del dispositivo cambiaron");
-        let expected = fingerprint(&identity, &self.policy, &nonce);
+        check_sources(identity, &self.policy)?;
+        let actual_sources = source_names(identity, &self.policy);
+        ensure!(
+            actual_sources == self.identity_sources,
+            "las fuentes de identidad del dispositivo cambiaron"
+        );
+        let expected = fingerprint(identity, &self.policy, &nonce);
         let pinned = decode_hex(&self.storage_fingerprint)?;
-        ensure!(pinned.len() == 32 && fixed_time_equal(&expected, &pinned),
-            "el volumen o el dispositivo físico no coincide con la instalación original");
+        ensure!(
+            pinned.len() == 32 && fixed_time_equal(&expected, &pinned),
+            "el volumen o el dispositivo físico no coincide con la instalación original"
+        );
         if self.policy.bind_to_executable {
             let pinned = self.executable_hash.as_deref()
                 .context("falta el hash del ejecutable sellado")?;
-            let actual = hash_file(executable)?;
-            ensure!(actual == pinned, "el ejecutable cambió desde el sellado");
+            ensure!(
+                hash_file(executable)? == pinned,
+                "el ejecutable cambió desde el sellado"
+            );
         }
         Ok(VerifiedInstallation {
             installation_id: self.installation_id.clone(),
@@ -319,4 +389,92 @@ mod tests {
         let nonce = [42u8; 32];
         assert_eq!(decode_hex(&hex(&nonce)).unwrap(), nonce);
     }
+    #[test]
+    fn creates_and_verifies_on_original_usb_identity() {
+        let original = identity("volume-1");
+        let seal = InstallationSeal::create_with_identity(
+            "sst", "1.0", Path::new("unused.exe"),
+            SealPolicy::portable_usb(), &original
+        ).unwrap();
+        let verified = seal.verify_with_identity(Path::new("unused.exe"), &original).unwrap();
+        assert_eq!(verified.installation_id, seal.installation_id);
+        assert!(seal.installation_id.starts_with("DS-"));
+    }
+
+    #[test]
+    fn copied_directory_or_seal_cannot_pass_on_another_usb() {
+        let original = identity("volume-1");
+        let mut copy = identity("volume-2");
+        copy.physical_serial = Some("different-physical-drive".to_owned());
+        let seal = InstallationSeal::create_with_identity(
+            "sst", "1.0", Path::new("unused.exe"),
+            SealPolicy::portable_usb(), &original
+        ).unwrap();
+        let transferred = serde_json::from_str::<InstallationSeal>(
+            &serde_json::to_string(&seal).unwrap()
+        ).unwrap();
+        assert!(transferred.verify_with_identity(Path::new("unused.exe"), &copy).is_err());
+        assert!(transferred.verify_with_identity(Path::new("unused.exe"), &original).is_ok());
+    }
+
+    #[test]
+    fn changing_only_physical_serial_invalidates_the_seal() {
+        let original = identity("volume-1");
+        let seal = InstallationSeal::create_with_identity(
+            "sst", "1.0", Path::new("unused.exe"),
+            SealPolicy::portable_usb(), &original
+        ).unwrap();
+        let mut copied = original;
+        copied.physical_serial = Some("other-drive".to_owned());
+        assert!(seal.verify_with_identity(Path::new("unused.exe"), &copied).is_err());
+    }
+
+    #[test]
+    fn fixed_disk_is_rejected_by_strict_usb_policy() {
+        let mut disk = identity("volume-1");
+        disk.removable = false;
+        assert!(InstallationSeal::create_with_identity(
+            "sst", "1.0", Path::new("unused.exe"),
+            SealPolicy::portable_usb(), &disk,
+        ).is_err());
+    }
+
+    #[test]
+    fn altered_nonce_or_fingerprint_is_rejected() {
+        let original = identity("volume-1");
+        let seal = InstallationSeal::create_with_identity(
+            "sst", "1.0", Path::new("unused.exe"),
+            SealPolicy::portable_usb(), &original
+        ).unwrap();
+        let mut bad_nonce = seal.clone();
+        bad_nonce.nonce = "ff".repeat(32);
+        assert!(bad_nonce.verify_with_identity(Path::new("unused.exe"), &original).is_err());
+        let mut bad_hash = seal;
+        bad_hash.storage_fingerprint = "0".repeat(64);
+        assert!(bad_hash.verify_with_identity(Path::new("unused.exe"), &original).is_err());
+    }
+
+    #[test]
+    fn application_identity_must_be_checked_by_consumer() {
+        let original = identity("volume-1");
+        let seal = InstallationSeal::create_with_identity(
+            "sst", "1.0", Path::new("unused.exe"),
+            SealPolicy::portable_usb(), &original
+        ).unwrap();
+        assert_ne!(seal.application_id, "some-other-app");
+        assert!(seal.verify_with_identity(Path::new("unused.exe"), &original).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_in_serialized_seal() {
+        let original = identity("volume-1");
+        let seal = InstallationSeal::create_with_identity(
+            "sst", "1.0", Path::new("unused.exe"),
+            SealPolicy::portable_usb(), &original
+        ).unwrap();
+        let mut value = serde_json::to_value(seal).unwrap();
+        value["unexpected_permission"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<InstallationSeal>(value).is_err());
+    }
+
 }
