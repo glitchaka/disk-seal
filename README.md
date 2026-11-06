@@ -219,6 +219,36 @@ No se pretende afirmar que un identificador de hardware sea imposible de falsifi
 
 La construcción concreta del autoextraíble puede vivir en el proyecto consumidor; `disk-seal` debe proporcionar las primitivas de identidad, creación y verificación.
 
+## Implementación inicial
+
+La biblioteca `disk-seal` ya contiene una primera implementación Windows: crea un
+Installation ID aleatorio, un nonce de 256 bits y una huella SHA-256 de serial
+del soporte + serial del volumen + sistema de archivos. Los seriales en bruto
+nunca se guardan en el sello. El sello se verifica contra el dispositivo desde
+el que se ejecuta el binario, y se rechaza un dispositivo o volumen diferente.
+
+La API disponible es `SealPolicy::portable_usb()`,
+`InstallationSeal::create(app_id, version, exe_path, policy)`,
+`InstallationSeal::save_new(path)`,
+`InstallationSeal::load(path)` y
+`InstallationSeal::verify_current_environment(exe_path)`.
+
+El modo estricto **rechaza dispositivos que Windows clasifica DRIVE_FIXED**
+y cualquier soporte que no permita obtener un serial físico. Esto debe
+resolverse mediante políticas aprobadas antes de entregar a terceros.
+
+### Seguridad y límites
+
+- Esta biblioteca **no crea ni valida licencias firmadas**; SST necesita un
+  módulo de activación separado y una clave pública embebida.
+- La huella física no es una identidad criptográfica: un atacante capaz de
+  falsificar las propiedades del dispositivo o modificar el programa puede
+  eludir un sello. La licencia firmada complementa la comprobación.
+- No se ha conectado todavía con la secuencia de arranque ni el autoextraíble
+  de SST. No se debe afirmar que las instalaciones entregadas están protegidas.
+- La API todavía está en desarrollo; no se declara probada en hardware Windows.
+
 ## Estado
 
-Diseño inicial reservado. Aún no se ha fijado una API estable ni se ha realizado implementación.
+Primera implementación de biblioteca incorporada; pendiente de integración
+y comprobación sobre dispositivos USB reales.
