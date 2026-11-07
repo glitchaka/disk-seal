@@ -22,7 +22,7 @@ enum Operation {
 fn parse_hex_public_key(value: &str) -> Result<[u8; 32]> {
     ensure!(value.len() == 64, "la clave pública requiere 64 caracteres hexadecimales");
     let mut key = [0u8; 32];
-    for (i, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (i, pair) in value.as_bytes().chunks(2).enumerate() {
         key[i] = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
     }
     Ok(key)
