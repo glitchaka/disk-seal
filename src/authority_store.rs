@@ -113,11 +113,10 @@ fn unprotect_current_user(_: &[u8]) -> Result<Vec<u8>> {
     anyhow::bail!("la autoridad de licencias requiere Windows DPAPI")
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
     #[test]
     fn user_scoped_dpapi_key_round_trip_without_plaintext_on_disk() {
         use rand_core::{OsRng, RngCore};
