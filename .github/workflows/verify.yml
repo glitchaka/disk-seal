@@ -29,17 +29,36 @@ jobs:
         run: cargo test --all-targets --verbose
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
-      - name: Windows native CLI smoke test
+      - name: Windows native executable personalization smoke test
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cargo run --quiet -- inspect | ConvertFrom-Json | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'No se pudo inspeccionar el soporte' }
-          # Expected negative test: a missing seal MUST fail. Prevent pwsh's
-          # native-command error preference from aborting before assertion.
+          $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          cargo run --quiet -- verify sst "$env:WINDIR\System32\notepad.exe" "missing.seal" *> $null
-          if ($LASTEXITCODE -eq 0) { throw 'Se aceptó una instalación sin sello' }
-          # GitHub's pwsh wrapper exits with LASTEXITCODE by default.
-          # The negative test succeeded, so explicitly reset the step status.
+          cargo run --quiet -- inspect | ConvertFrom-Json | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Fallo inspección de dispositivo' }
+          $installationId = (cargo run --quiet -- new-id).Trim()
+          if ($LASTEXITCODE -ne 0 -or !$installationId.StartsWith("DS-")) {
+            throw 'No se creó Installation ID'
+          }
+          cargo build --quiet --example guarded_app
+          if ($LASTEXITCODE -ne 0) { throw 'No compiló aplicación independiente' }
+          $template = Join-Path $env:GITHUB_WORKSPACE 'target\debug\examples\guarded_app.exe'
+          $personalized = Join-Path $env:RUNNER_TEMP 'guarded_app-personalized.exe'
+          cargo run --quiet -- personalize $template $personalized $installationId
+          if ($LASTEXITCODE -ne 0) { throw 'Fallo personalización del PE' }
+          $observed = (& $personalized identity).Trim()
+          if ($LASTEXITCODE -ne 0 -or $observed -ne $installationId) {
+            throw "El ejecutable personalizado no conservó su identidad"
+          }
+          & $template identity *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw 'El ejecutable maestro sin ID fue aceptado'
+          }
+          $pub = "00" * 32
+          cargo run --quiet -- verify demo $personalized 'missing.seal' 'missing.license' $pub *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw 'Se aceptó una instalación sin sello y licencia'
+          }
+          Write-Host "Personalización PE correcta, ID interno comprobado, original sin ID y licencia ausente rechazados."
           exit 0
