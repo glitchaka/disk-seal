@@ -562,6 +562,54 @@ mod tests {
     }
 
     #[test]
+    fn complete_executable_usb_and_signed_license_binding() {
+        // A distinct test application (not SST) with simulated Windows USB
+        // properties demonstrates that neither copying the .exe, nor copying
+        // the full license/seal folder to another USB is sufficient.
+        let original = identity("USB-A-VOLUME");
+        let mut copied_usb = identity("USB-B-VOLUME");
+        copied_usb.physical_serial = Some("USB-B-PHYSICAL".into());
+        let seal = InstallationSeal::create_with_identity(
+            "other-app", "2.0", Path::new("mock-executable"),
+            SealPolicy::portable_usb(), &original,
+        ).unwrap();
+        let seal_bytes = seal.to_binary().unwrap();
+        let issuer = authorization::generate_signing_key();
+        let permit = authorization::SignedLicense::issue(
+            &seal_bytes, "operador autorizado", &issuer
+        ).unwrap();
+
+        let mut entropy = [0u8; 8];
+        OsRng.fill_bytes(&mut entropy);
+        let folder = std::env::temp_dir().join(format!("diskseal-integration-{}", hex(&entropy)));
+        fs::create_dir_all(&folder).unwrap();
+        let unsigned = folder.join("template.exe");
+        let valid_exe = folder.join("delivered.exe");
+        let copied_exe = folder.join("copied.exe");
+        fs::write(&unsigned, vec![0x90u8; 256]).unwrap();
+        executable::personalize_executable(&unsigned, &valid_exe, &seal.installation_id).unwrap();
+        fs::copy(&valid_exe, &copied_exe).unwrap();
+        let internal = executable::read_executable_id(&valid_exe).unwrap();
+
+        let authentic_seal = permit.verify(
+            &seal_bytes, &internal, "other-app", &issuer.verifying_key()
+        ).unwrap();
+        assert!(authentic_seal.verify_with_identity(&valid_exe, &original).is_ok());
+        assert!(authentic_seal.verify_with_identity(&copied_exe, &copied_usb).is_err());
+
+        // Corruption or replacement of a signed binary seal is rejected.
+        let mut corrupted = seal_bytes.clone();
+        corrupted.push(1u8);
+        assert!(permit.verify(
+            &corrupted, &internal, "other-app", &issuer.verifying_key()
+        ).is_err());
+        assert!(permit.verify(
+            &seal_bytes, &internal, "sst", &issuer.verifying_key()
+        ).is_err());
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn rejects_unknown_fields_in_serialized_seal() {
         let original = identity("volume-1");
         let seal = InstallationSeal::create_with_identity(
