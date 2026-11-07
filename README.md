@@ -219,6 +219,89 @@ No se pretende afirmar que un identificador de hardware sea imposible de falsifi
 
 La construcción concreta del autoextraíble puede vivir en el proyecto consumidor; `disk-seal` debe proporcionar las primitivas de identidad, creación y verificación.
 
+## Identidad incorporada al ejecutable y autorización firmada
+
+Cada instalación autorizada se compone de un ejecutable personalizado
+con su ID interno, un sello binario CBOR del USB y una licencia Ed25519.
+La firma protege los datos; CBOR es un formato binario, **no cifrado**.
+
+`read_executable_id()` obtiene el ID del ejecutable mediante su tráiler
+binario, no de un archivo lateral. La licencia vincula ese ID con la
+huella del dispositivo físico/volumen y con los bytes exactos del sello.
+Una copia conserva el ID antiguo, pero tendrá otra huella al ejecutarse
+desde un pendrive diferente.
+
+### Uso desde cualquier aplicación Rust
+
+El consumidor debe integrar la biblioteca y ejecutar esta comprobación
+antes de habilitar sus funcionalidades:
+
+```rust
+use disk_seal::verify_authorized_installation;
+
+fn authorize() -> anyhow::Result<()> {
+    // La clave pública real se incorpora en el binario de producción.
+    const AUTHORITY_PUBLIC_KEY: [u8; 32] = [0u8; 32];
+    let exe = std::env::current_exe()?;
+    let root = exe.parent().expect("ejecutable sin directorio");
+    verify_authorized_installation(
+        &exe,
+        &root.join("data/installation.seal"),
+        &root.join("data/installation.license"),
+        "mi-aplicacion",
+        &AUTHORITY_PUBLIC_KEY,
+    )?;
+    Ok(())
+}
+```
+
+La clave pública de este ejemplo es un marcador; debe sustituirse por
+la clave pública del administrador. Una aplicación de producción NO debe
+aceptar claves públicas elegidas por el usuario.
+
+### Preparación de una copia
+
+En un pendrive nuevo, la autoridad prepara una plantilla sin personalizar:
+
+```powershell
+# Generar un ID para esta entrega (DS-...).
+cargo run -- new-id
+# Copiar la plantilla y añadir al .exe el ID devuelto.
+cargo run -- personalize .\unsigned-template.exe E:\App\mi-app.exe DS-ID_GENERADO
+# Crear sello binario del dispositivo actual y del ID incluido en mi-app.exe.
+cargo run -- create mi-aplicacion 1.0 E:\App\mi-app.exe E:\App\data\installation.seal
+```
+
+El sistema de administración (en equipo de confianza, NO en el USB) debe
+firmar ese sello mediante `SignedLicense::issue` y guardar el resultado
+binario en `installation.license`. La biblioteca también proporciona
+`generate_signing_key`, `SignedLicense::save_new` y `SignedLicense::verify`.
+La clave privada no se distribuye nunca.
+
+El subcomando `verify-storage` sirve solo para diagnosticar la correspondencia
+de la unidad; **no concede autorización**. La verificación final exige la
+firma Ed25519. El ejemplo `examples/guarded_app.rs` permite practicar con
+una aplicación distinta de SST.
+
+### Firma de ejecutables y autoupdate
+
+Personalizar un ejecutable Windows ya firmado puede invalidar Authenticode.
+El orden correcto es: **personalizar, firmar con certificado de código,
+entregar**. Para mantener la identidad durante autoupdate, personalizar
+un lanzador estable y actualizar el núcleo de la aplicación por separado.
+La biblioteca no instala ni actualiza SST.
+
+### Pruebas y límites
+
+Las pruebas CI cubren identificación del .exe, licencia con firmas válidas
+e inválidas, cambio simulado de USB, modificación de sellos y ejecución en
+Windows de una aplicación independiente personalizada. La validación física
+sobre pendrives de distintos modelos y formatos sigue pendiente.
+
+Un pendrive común puede exponer seriales clonables; disk-seal dificulta la
+copia casual, pero no garantiza resistencia frente a emulación del hardware
+o modificación del ejecutable.
+
 ## Uso actual como biblioteca y CLI
 
 La biblioteca puede consumirse desde un instalador Rust o desde SST mediante
