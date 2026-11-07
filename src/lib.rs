@@ -413,6 +413,7 @@ fn fixed_time_equal(lhs: &[u8], rhs: &[u8]) -> bool {
 /// Complete check for any consumer executable, not limited to SST:
 /// 1. read its embedded identity; 2. validate issuer's Ed25519 signature;
 /// 3. validate exact binary seal; 4. match physical USB/volume metadata.
+///
 /// A consumer must call this before enabling protected functionality.
 pub fn verify_authorized_installation(
     executable: &Path,

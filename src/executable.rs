@@ -22,7 +22,7 @@ fn id_bytes(installation_id: &str) -> Result<[u8; 16]> {
         suffix.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase()),
         "Installation ID no es hexadecimal canónico");
     let decoded = crate::decode_hex(suffix)?;
-    Ok(decoded.try_into().map_err(|_| anyhow::anyhow!("Installation ID de longitud incorrecta"))?)
+    decoded.try_into().map_err(|_| anyhow::anyhow!("Installation ID de longitud incorrecta"))
 }
 
 fn checksum(id: &[u8; 16]) -> [u8; 32] {
