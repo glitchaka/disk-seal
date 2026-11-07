@@ -15,6 +15,7 @@ mod windows;
 
 pub mod authorization;
 pub mod authority_store;
+pub mod provision;
 pub mod executable;
 
 pub use authorization::{generate_signing_key, SignedLicense};
