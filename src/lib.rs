@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 mod windows;
 
 pub mod authorization;
+pub mod authority_store;
 pub mod executable;
 
 pub use authorization::{generate_signing_key, SignedLicense};
