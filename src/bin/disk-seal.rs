@@ -1,8 +1,11 @@
 //! Provisioning utility. Actual license ISSUANCE belongs only to the trusted
 //! administrator environment; this executable never contains a private key.
-use std::{env, path::PathBuf, process};
+use std::{env, path::PathBuf, process, fs};
 use anyhow::{bail, ensure, Result};
 use disk_seal::{
+    authority_store::{generate_authority_files, load_authority_key},
+    provision::create_authorized_copy,
+    SignedLicense,
     inspect_storage, new_installation_id, personalize_executable,
     read_executable_id, verify_authorized_installation, InstallationSeal, SealPolicy,
 };
@@ -10,6 +13,15 @@ use disk_seal::{
 enum Operation {
     Inspect(PathBuf),
     NewId,
+    Keygen { private: PathBuf, public: PathBuf },
+    Provision {
+        app: String, version: String, template: PathBuf, destination: PathBuf,
+        assigned_to: String, private: PathBuf,
+    },
+    Issue {
+        app: String, executable: PathBuf, seal: PathBuf,
+        assigned_to: String, private: PathBuf, license: PathBuf,
+    },
     Personalize { template: PathBuf, destination: PathBuf, id: String },
     Create { app: String, version: String, executable: PathBuf, seal: PathBuf },
     VerifyStorage { app: String, executable: PathBuf, seal: PathBuf },
@@ -35,6 +47,22 @@ fn parse(args: &[String]) -> Result<Operation> {
         [cmd, exe] if cmd == "inspect" =>
             Ok(Operation::Inspect(PathBuf::from(exe))),
         [cmd] if cmd == "new-id" => Ok(Operation::NewId),
+        [cmd, private, public] if cmd == "keygen" =>
+            Ok(Operation::Keygen {
+                private: PathBuf::from(private), public: PathBuf::from(public),
+            }),
+        [cmd, app, version, template, dest, assigned, private] if cmd == "provision" =>
+            Ok(Operation::Provision {
+                app: app.to_owned(), version: version.to_owned(),
+                template: PathBuf::from(template), destination: PathBuf::from(dest),
+                assigned_to: assigned.to_owned(), private: PathBuf::from(private),
+            }),
+        [cmd, app, exe, seal, assigned, private, license] if cmd == "issue" =>
+            Ok(Operation::Issue {
+                app: app.to_owned(), executable: PathBuf::from(exe),
+                seal: PathBuf::from(seal), assigned_to: assigned.to_owned(),
+                private: PathBuf::from(private), license: PathBuf::from(license),
+            }),
         [cmd, template, dest, id] if cmd == "personalize" =>
             Ok(Operation::Personalize {
                 template: PathBuf::from(template), destination: PathBuf::from(dest),
@@ -58,6 +86,9 @@ fn parse(args: &[String]) -> Result<Operation> {
             }),
         _ => bail!(
             "Uso:\n  disk-seal inspect [EJECUTABLE]\n  disk-seal new-id\n  \
+             disk-seal keygen CLAVE-PRIVADA-DPAPI CLAVE-PUBLICA\n  \
+             disk-seal provision APP VERSION PLANTILLA EXE-USB TITULAR CLAVE-PRIVADA-DPAPI\n  \
+             disk-seal issue APP EXE-USB SELLO TITULAR CLAVE-PRIVADA-DPAPI LICENCIA\n  \
              disk-seal personalize PLANTILLA DESTINO DS-ID\n  \
              disk-seal create APP VERSION EJECUTABLE-PERSONALIZADO SELLO-BINARIO\n  \
              disk-seal verify-storage APP EJECUTABLE SELLO-BINARIO  (diagnóstico, NO autoriza)\n  \
@@ -72,6 +103,45 @@ fn run(op: Operation) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&inspect_storage(&path)?)?);
         }
         Operation::NewId => println!("{}", new_installation_id()),
+        Operation::Keygen { private, public } => {
+            let public_hex = generate_authority_files(&private, &public)?;
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "status": "authority_created",
+                "private_key_dpapi": private,
+                "public_key_file": public,
+                "public_key_hex": public_hex,
+            }))?);
+        }
+        Operation::Provision { app, version, template, destination, assigned_to, private } => {
+            let copy = create_authorized_copy(
+                &app, &version, &template, &destination, &assigned_to, &private
+            )?;
+            println!("{}", serde_json::to_string_pretty(&copy)?);
+        }
+        Operation::Issue { app, executable, seal, assigned_to, private, license } => {
+            let key = load_authority_key(&private)?;
+            let seal_obj = InstallationSeal::load_binary(&seal)?;
+            ensure!(seal_obj.application_id == app &&
+                    read_executable_id(&executable)? == seal_obj.installation_id,
+                    "ID del ejecutable, aplicación y sello no coinciden");
+            seal_obj.verify_for_application(&app, &executable)?;
+            let bytes = fs::read(&seal)?;
+            let signed = SignedLicense::issue(&bytes, &assigned_to, &key)?;
+            signed.save_new(&license)?;
+            let verified = verify_authorized_installation(
+                &executable, &seal, &license, &app, key.verifying_key().as_bytes()
+            );
+            if let Err(error) = verified {
+                let _ = fs::remove_file(&license);
+                return Err(error);
+            }
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "status": "authorized",
+                "installation_id": seal_obj.installation_id,
+                "assigned_to": assigned_to,
+                "license_path": license,
+            }))?);
+        }
         Operation::Personalize { template, destination, id } => {
             personalize_executable(&template, &destination, &id)?;
             println!("{}", read_executable_id(&destination)?);
@@ -142,6 +212,21 @@ mod tests {
             "11".repeat(32),
         ];
         assert!(matches!(parse(&verify).unwrap(), Operation::VerifySigned { .. }));
+    }
+
+    #[test]
+    fn parses_authority_and_new_copy_commands() {
+        assert!(matches!(
+            parse(&["keygen".into(), "private.dskey".into(), "public.hex".into()]).unwrap(),
+            Operation::Keygen { .. }
+        ));
+        assert!(matches!(
+            parse(&["provision".into(), "horror-me".into(), "0.4.1".into(),
+                "C:\\master.exe".into(), "E:\\HorrorMe.exe".into(),
+                "Juan".into(), "C:\\keys\\private.dskey".into()]).unwrap(),
+            Operation::Provision { .. }
+        ));
+        assert!(parse(&["provision".into(), "horror-me".into()]).is_err());
     }
 
     #[test]
