@@ -3,7 +3,7 @@
 //! The signing key exists only in the provisioning authority. Distributed
 //! applications contain the public verifying key, never the signing key.
 use std::{fs, io::Write, path::Path};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand_core::OsRng;
@@ -146,8 +146,9 @@ fn signing_bytes(claims: &LicenseClaims) -> Result<Vec<u8>> {
         "identidad de licencia vacía");
     let mut content = Vec::with_capacity(512);
     content.extend_from_slice(SIGN_DOMAIN);
+    let version = claims.format_version.to_string();
     for part in [
-        claims.format_version.to_string().as_str(),
+        version.as_str(),
         &claims.application_id,
         &claims.installation_id,
         &claims.authorized_seal_sha256,
@@ -202,7 +203,8 @@ mod tests {
         assert_ne!(id, cloned_id);
         assert!(license.verify(&seal, cloned_id, "demo", &key.verifying_key()).is_err());
         let mut altered_seal = seal.clone();
-        altered_seal[altered_seal.len() - 1] ^= 0x01;
+        let end = altered_seal.len() - 1;
+        altered_seal[end] ^= 0x01;
         assert!(license.verify(&altered_seal, &id, "demo", &key.verifying_key()).is_err());
     }
 

@@ -8,7 +8,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
 };
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
 
 const MARKER: &[u8; 8] = b"DSIDV001";
