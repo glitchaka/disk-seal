@@ -44,6 +44,22 @@ pub fn create_authorized_copy(
     ensure!(!usb_executable.exists() && !seal_file.exists() && !license_file.exists(),
         "la copia de destino ya existe: no sobrescribir identidad/activación");
 
+    // Do not allow the authority's private key to live on the recipient's
+    // drive. DPAPI protects the key, but the USB must never carry the file.
+    #[cfg(windows)]
+    {
+        let admin_key = private_authority_key.canonicalize()
+            .context("la clave de autoridad no está en una ruta local válida")?;
+        let destination = destination_parent.canonicalize()?;
+        let admin_volume = admin_key.components().next()
+            .context("ubicación de clave privada inválida")?
+            .as_os_str().to_string_lossy().to_uppercase();
+        let target_volume = destination.components().next()
+            .context("volumen de instalación inválido")?
+            .as_os_str().to_string_lossy().to_uppercase();
+        ensure!(admin_volume != target_volume,
+            "la clave privada debe permanecer fuera del pendrive de destino");
+    }
     // Load and authenticate the authority in the user's trusted admin context.
     let signing_key = load_authority_key(private_authority_key)?;
     let trusted_key = signing_key.verifying_key().to_bytes();
