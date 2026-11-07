@@ -49,7 +49,7 @@ fn certificate_table(exe: &mut File) -> Result<Option<(u64, u64)>> {
         return Ok(None);
     }
     let pe_offset = u32::from_le_bytes(dos[0x3c..0x40].try_into()?) as u64;
-    ensure!(pe_offset >= 64 && pe_offset < 1024 * 1024 && pe_offset + 26 <= length,
+    ensure!((64..1024 * 1024).contains(&pe_offset) && pe_offset + 26 <= length,
         "cabecera PE inválida");
     exe.seek(SeekFrom::Start(pe_offset))?;
     let mut coff = [0u8; 24];
