@@ -113,7 +113,29 @@ pub fn inspect_storage(executable: &Path) -> Result<StorageInspection> {
     })
 }
 
+/// Generate a fresh 128-bit identity for a new authorized installation.
+/// The same ID must be embedded into its personalized executable.
+pub fn new_installation_id() -> String {
+    let mut unique = [0u8; 16];
+    OsRng.fill_bytes(&mut unique);
+    format!("DS-{}", hex(&unique).to_uppercase())
+}
+
 impl InstallationSeal {
+    /// Build the seal for an already-personalized executable; its embedded
+    /// ID remains the immutable installation identity.
+    pub fn create_for_personalized_executable(
+        app_id: &str,
+        app_version: &str,
+        executable: &Path,
+        policy: SealPolicy,
+    ) -> Result<Self> {
+        let id = executable::read_executable_id(executable)?;
+        let mut seal = Self::create(app_id, app_version, executable, policy)?;
+        seal.installation_id = id;
+        Ok(seal)
+    }
+
     /// Called once by the installer after extraction, on the original drive.
     /// Create a seal for an existing executable on the USB drive.
     /// The caller must store and authenticate the seal using a separately
@@ -150,9 +172,7 @@ impl InstallationSeal {
         check_sources(identity, &policy)?;
 
         let mut nonce = [0u8; 32];
-        let mut installation = [0u8; 16];
         OsRng.fill_bytes(&mut nonce);
-        OsRng.fill_bytes(&mut installation);
         let executable_hash = if policy.bind_to_executable {
             Some(hash_file(executable)?)
         } else {
@@ -163,7 +183,7 @@ impl InstallationSeal {
             seal_format_version: SEAL_VERSION,
             application_id: app_id.to_owned(),
             application_version: app_version.to_owned(),
-            installation_id: format!("DS-{}", hex(&installation).to_uppercase()),
+            installation_id: new_installation_id(),
             created_at: Local::now().fixed_offset(),
             storage_fingerprint: hex(&fingerprint(identity, &policy, &nonce)),
             nonce: hex(&nonce),
