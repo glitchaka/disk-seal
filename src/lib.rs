@@ -13,6 +13,15 @@ use sha2::{Digest, Sha256};
 #[cfg(windows)]
 mod windows;
 
+pub mod authorization;
+pub mod executable;
+
+pub use authorization::{generate_signing_key, SignedLicense};
+pub use executable::{personalize_executable, read_executable_id};
+
+const BINARY_MAGIC: &[u8; 8] = b"DSSEAL01";
+const MAX_SEAL_BYTES: usize = 128 * 1024;
+
 const SEAL_VERSION: u32 = 1;
 const HASH_DOMAIN: &[u8] = b"disk-seal/windows/v1\0";
 
@@ -223,6 +232,50 @@ impl InstallationSeal {
         })
     }
 
+    /// The canonical binary seal representation used by signed deployments.
+    /// Ed25519 authorizes the exact bytes returned here (including the policy).
+    pub fn to_binary(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(self, &mut bytes)?;
+        ensure!(bytes.len() <= MAX_SEAL_BYTES, "sello demasiado grande");
+        let mut out = Vec::with_capacity(12 + bytes.len());
+        out.extend_from_slice(BINARY_MAGIC);
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&bytes);
+        Ok(out)
+    }
+
+    pub fn from_binary(bytes: &[u8]) -> Result<Self> {
+        ensure!(bytes.len() >= 12 && bytes.len() <= MAX_SEAL_BYTES + 12,
+            "sello truncado o demasiado grande");
+        ensure!(&bytes[..8] == BINARY_MAGIC, "cabecera de sello inválida");
+        let length = u32::from_le_bytes(bytes[8..12].try_into()?) as usize;
+        ensure!(length == bytes.len() - 12, "longitud de sello inconsistente");
+        ciborium::from_reader(&bytes[12..]).context("sello CBOR corrupto")
+    }
+
+    /// Write the binary seal once. A missing/corrupt seal must never be
+    /// automatically regenerated on consumer startup.
+    pub fn save_binary_new(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let bytes = self.to_binary()?;
+        let mut output = fs::OpenOptions::new().write(true).create_new(true)
+            .open(path).with_context(|| format!(
+                "sello existente o ruta inaccesible: {}", path.display()
+            ))?;
+        output.write_all(&bytes)?;
+        output.sync_all()?;
+        Ok(())
+    }
+
+    pub fn load_binary(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let bytes = fs::read(path).with_context(|| format!(
+            "sello ausente: {}", path.display()
+        ))?;
+        Self::from_binary(&bytes)
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         serde_json::from_slice(&fs::read(path)
@@ -335,6 +388,28 @@ fn fixed_time_equal(lhs: &[u8], rhs: &[u8]) -> bool {
     let mut difference = 0u8;
     for (a, b) in lhs.iter().zip(rhs.iter()) { difference |= a ^ b; }
     difference == 0
+}
+
+/// Complete check for any consumer executable, not limited to SST:
+/// 1. read its embedded identity; 2. validate issuer's Ed25519 signature;
+/// 3. validate exact binary seal; 4. match physical USB/volume metadata.
+/// A consumer must call this before enabling protected functionality.
+pub fn verify_authorized_installation(
+    executable: &Path,
+    binary_seal_path: &Path,
+    signed_license_path: &Path,
+    expected_application_id: &str,
+    trusted_public_key: &[u8; 32],
+) -> Result<VerifiedInstallation> {
+    let embedded_id = executable::read_executable_id(executable)?;
+    let seal_bytes = fs::read(binary_seal_path)
+        .with_context(|| format!("sello ausente: {}", binary_seal_path.display()))?;
+    let license = authorization::SignedLicense::load(signed_license_path)?;
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(trusted_public_key)
+        .context("la clave pública de la autoridad es inválida")?;
+    let seal = license.verify(&seal_bytes, &embedded_id,
+        expected_application_id, &verifying_key)?;
+    seal.verify_for_application(expected_application_id, executable)
 }
 
 fn capture_storage(executable: &Path) -> Result<StorageIdentity> {
