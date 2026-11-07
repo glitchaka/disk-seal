@@ -33,21 +33,93 @@ fn checksum(id: &[u8; 16]) -> [u8; 32] {
     sha.finalize().into()
 }
 
+/// Return the file offset of an Authenticode certificate table, when present.
+/// The PE security data directory uses a file OFFSET rather than an RVA.
+/// Signing normally appends the certificate after the personalized trailer,
+/// sometimes adding 0-7 zero padding bytes for 8-byte alignment.
+fn certificate_table(exe: &mut File) -> Result<Option<(u64, u64)>> {
+    let length = exe.metadata()?.len();
+    if length < 64 {
+        return Ok(None);
+    }
+    exe.seek(SeekFrom::Start(0))?;
+    let mut dos = [0u8; 64];
+    exe.read_exact(&mut dos)?;
+    if &dos[..2] != b"MZ" {
+        return Ok(None);
+    }
+    let pe_offset = u32::from_le_bytes(dos[0x3c..0x40].try_into()?) as u64;
+    ensure!(pe_offset >= 64 && pe_offset < 1024 * 1024 && pe_offset + 26 <= length,
+        "cabecera PE inválida");
+    exe.seek(SeekFrom::Start(pe_offset))?;
+    let mut coff = [0u8; 24];
+    exe.read_exact(&mut coff)?;
+    ensure!(&coff[..4] == b"PE\0\0", "firma PE inválida");
+    let optional_size = u16::from_le_bytes(coff[20..22].try_into()?) as u64;
+    let optional_start = pe_offset + 24;
+    ensure!(optional_start + optional_size <= length, "cabecera PE truncada");
+    exe.seek(SeekFrom::Start(optional_start))?;
+    let mut magic = [0u8; 2];
+    exe.read_exact(&mut magic)?;
+    let directory_offset: u64 = match u16::from_le_bytes(magic) {
+        0x10b => 96,  // PE32
+        0x20b => 112, // PE32+
+        _ => anyhow::bail!("formato de cabecera PE desconocido"),
+    };
+    // Security directory (index 4), 8 bytes per entry.
+    let security_offset = directory_offset + 4 * 8;
+    if optional_size < security_offset + 8 {
+        return Ok(None);
+    }
+    exe.seek(SeekFrom::Start(optional_start + security_offset))?;
+    let mut security = [0u8; 8];
+    exe.read_exact(&mut security)?;
+    let start = u32::from_le_bytes(security[..4].try_into()?) as u64;
+    let size = u32::from_le_bytes(security[4..].try_into()?) as u64;
+    if start == 0 && size == 0 {
+        return Ok(None);
+    }
+    ensure!(start > 0 && size >= 8 && start + size <= length,
+        "tabla de certificados PE corrupta");
+    Ok(Some((start, size)))
+}
+
 /// Read the identifier from the executable itself, not a sidecar file.
+/// Handles unsigned binaries and PE files signed with Authenticode AFTER
+/// personalization (where the certificate table appears after our identity).
 pub fn read_executable_id(path: &Path) -> Result<String> {
     let mut exe = File::open(path)
         .with_context(|| format!("no se pudo abrir el ejecutable {}", path.display()))?;
-    ensure!(exe.metadata()?.len() >= TRAILER_SIZE, "ejecutable sin identidad disk-seal");
-    exe.seek(SeekFrom::End(-(TRAILER_SIZE as i64)))?;
-    let mut trailer = [0u8; TRAILER_SIZE as usize];
-    exe.read_exact(&mut trailer)?;
-    ensure!(&trailer[..8] == MARKER, "ejecutable sin identidad disk-seal");
-    let id: [u8; 16] = trailer[8..24].try_into()?;
-    ensure!(
-        crate::fixed_time_equal(&checksum(&id), &trailer[24..56]),
-        "identidad incorporada al ejecutable corrupta"
-    );
-    Ok(format!("DS-{}", crate::hex(&id).to_uppercase()))
+    let length = exe.metadata()?.len();
+    ensure!(length >= TRAILER_SIZE, "ejecutable sin identidad disk-seal");
+    let certificate = certificate_table(&mut exe)?;
+    let trailer_end = certificate.map(|(start, _)| start).unwrap_or(length);
+    let max_padding = if certificate.is_some() { 7 } else { 0 };
+
+    for padding in 0..=max_padding {
+        let Some(start) = trailer_end.checked_sub(TRAILER_SIZE + padding) else {
+            continue;
+        };
+        exe.seek(SeekFrom::Start(start))?;
+        let mut trailer = [0u8; TRAILER_SIZE as usize];
+        exe.read_exact(&mut trailer)?;
+        if &trailer[..8] != MARKER {
+            continue;
+        }
+        if padding > 0 {
+            let mut bytes = [0u8; 7];
+            exe.read_exact(&mut bytes[..padding as usize])?;
+            ensure!(bytes[..padding as usize].iter().all(|b| *b == 0),
+                "relleno del certificado PE alterado");
+        }
+        let id: [u8; 16] = trailer[8..24].try_into()?;
+        ensure!(
+            crate::fixed_time_equal(&checksum(&id), &trailer[24..56]),
+            "identidad incorporada al ejecutable corrupta"
+        );
+        return Ok(format!("DS-{}", crate::hex(&id).to_uppercase()));
+    }
+    anyhow::bail!("ejecutable sin identidad disk-seal")
 }
 
 /// Copy an **unsigned** template to a new file and embed a unique ID.
@@ -63,6 +135,9 @@ pub fn personalize_executable(
     ensure!(read_executable_id(unsigned_template).is_err(),
         "el ejecutable de origen ya está personalizado");
     let mut source = File::open(unsigned_template)?;
+    ensure!(certificate_table(&mut source)?.is_none(),
+        "la plantilla ya tiene firma Authenticode; personalizarla invalidaría la firma");
+    source.seek(SeekFrom::Start(0))?;
     ensure!(source.metadata()?.len() >= 64, "ejecutable de origen demasiado pequeño");
     let mut output = OpenOptions::new().write(true).create_new(true)
         .open(destination)
@@ -115,6 +190,47 @@ mod tests {
         content[last] ^= 0x01;
         fs::write(&stolen, content).unwrap();
         assert!(read_executable_id(&stolen).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn signed_pe_reads_identity_before_authenticode_certificate_table() {
+        let mut seed = [0u8; 8];
+        OsRng.fill_bytes(&mut seed);
+        let root = std::env::temp_dir().join(format!("disk-seal-signed-{}", crate::hex(&seed)));
+        fs::create_dir_all(&root).unwrap();
+        let template = root.join("unsigned.exe");
+        let personalized = root.join("personalized.exe");
+        const ID: &str = "DS-ABABABABABABABABABABABABABABABAB";
+
+        // Minimal PE32+ headers (for metadata parsing tests, not executable).
+        let mut binary = vec![0u8; 513];
+        binary[..2].copy_from_slice(b"MZ");
+        binary[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        binary[0x80..0x84].copy_from_slice(b"PE\0\0");
+        binary[0x94..0x96].copy_from_slice(&0xF0u16.to_le_bytes());
+        binary[0x98..0x9a].copy_from_slice(&0x20Bu16.to_le_bytes());
+        fs::write(&template, binary).unwrap();
+        personalize_executable(&template, &personalized, ID).unwrap();
+        assert_eq!(read_executable_id(&personalized).unwrap(), ID);
+
+        // A mock Authenticode signer aligns to 8 bytes and appends a
+        // WIN_CERTIFICATE. This exercises the real security directory layout.
+        let mut signed = fs::read(&personalized).unwrap();
+        let padding = (8 - signed.len() % 8) % 8;
+        let cert_start = (signed.len() + padding) as u32;
+        signed[0x128..0x12c].copy_from_slice(&cert_start.to_le_bytes());
+        signed[0x12c..0x130].copy_from_slice(&16u32.to_le_bytes());
+        signed.resize(signed.len() + padding, 0);
+        signed.extend_from_slice(&[0u8; 16]);
+        fs::write(&personalized, &signed).unwrap();
+
+        assert_eq!(read_executable_id(&personalized).unwrap(), ID);
+        assert!(personalize_executable(&personalized, &root.join("copy.exe"), ID).is_err());
+        let identity_index = cert_start as usize - padding - TRAILER_SIZE as usize;
+        signed[identity_index + 8] ^= 0x55;
+        fs::write(&personalized, signed).unwrap();
+        assert!(read_executable_id(&personalized).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }
