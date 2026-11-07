@@ -64,8 +64,8 @@ se exige una copia nueva sin archivos previos.
 ## Paso 4: comprobar el ejecutable preparado
 
 ```powershell
-& E:\HorrorMe\HorrorMe.exe --disk-seal-check
-$LASTEXITCODE
+$check = Start-Process -FilePath 'E:\HorrorMe\HorrorMe.exe' -ArgumentList '--disk-seal-check' -Wait -PassThru
+$check.ExitCode
 ```
 
 El resultado esperado es 0. Si retorna 21, el EXE no contiene ID.
