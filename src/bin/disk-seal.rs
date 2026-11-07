@@ -1,6 +1,6 @@
 //! Provisioning utility. Actual license ISSUANCE belongs only to the trusted
 //! administrator environment; this executable never contains a private key.
-use std::{env, path::{Path, PathBuf}, process};
+use std::{env, path::PathBuf, process};
 use anyhow::{bail, ensure, Result};
 use disk_seal::{
     inspect_storage, new_installation_id, personalize_executable,
